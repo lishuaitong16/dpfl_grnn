@@ -1,0 +1,22 @@
+#!/bin/bash
+# 步骤四：联邦学习 + 差分隐私 + GRNN 攻击防御对比
+#
+# 对同一张图片，在不同 ε_total 下施加 DP 噪声后跑 GRNN 攻击，
+# 对比无 DP 和有 DP 时的还原效果（PSNR）。
+# 噪声基于简单组合定理：ε_round = ε_total / T
+#
+# 结果保存至：
+#   results/defense/defense_laplace.png  — 拉普拉斯防御对比大图
+#   results/defense/defense_gaussian.png — 高斯防御对比大图
+#   results/defense/psnr_bar.png         — PSNR 柱状图
+#   results/defense/psnr_data.csv        — PSNR 原始数据
+
+python -m experiments.exp3_defense \
+    --T           30                    \
+    --clip_C      1.0                   \
+    --epsilons    inf,10.0,1.0,0.5,0.1 \
+    --iterations  2000                  \
+    --train_iters 300                   \
+    --seed        0                     \
+    --gpu         0                     \
+    --outdir      ./results/defense
