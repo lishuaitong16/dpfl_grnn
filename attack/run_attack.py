@@ -46,7 +46,10 @@ def compute_fake_gradient(model, fake_img, fake_label, device):
     这样对生成器可微。
     """
     model = model.to(device)
-    out = model(fake_img.to(device))
+    # tanh [-1,1] -> MNIST normalized space, matching how true gradients are computed
+    fake_norm = (fake_img + 1.0) / 2.0
+    fake_norm = (fake_norm - 0.1307) / 0.3081
+    out = model(fake_norm.to(device))
     log_prob = torch.log_softmax(out, dim=1)
     loss = -(fake_label.to(device) * log_prob).sum(dim=1).mean()
     grads = torch.autograd.grad(loss, list(model.parameters()), create_graph=True)
