@@ -56,9 +56,11 @@ def main():
     p.add_argument("--data_root", type=str, default="./data")
     p.add_argument("--outdir", type=str, default="./results/attack")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--gpu", type=int, default=0,
+                   help="GPU index to use, -1 for CPU")
     args = p.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = f"cuda:{args.gpu}" if args.gpu >= 0 and torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     os.makedirs(args.outdir, exist_ok=True)
     torch.manual_seed(args.seed)

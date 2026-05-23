@@ -11,4 +11,5 @@ python -m experiments.exp2_attack \
     --iterations  2000 \
     --train_iters 0    \
     --seed        0    \
+    --gpu         0    \
     --outdir      ./results/attack
