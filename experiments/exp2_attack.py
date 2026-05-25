@@ -70,7 +70,8 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    # 1. 全局模型
+    # 1. 全局模型（Sigmoid：GRNN 需要 sigmoid 做二阶梯度反传）
+    # FL 训练（exp1）使用 ReLU，原因见 exp1_dp_params.py 注释。
     if args.model == "resnet18":
         model = build_resnet18(num_classes=10, in_channels=1, act="sigmoid").to(device)
     else:

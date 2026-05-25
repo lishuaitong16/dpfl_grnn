@@ -2,13 +2,18 @@
 
 流程：
   1. 取同一张真实 MNIST 图，用 Sigmoid 版 LeNet 计算真实梯度 g。
-  2. 对 g 分别施加 ε_total ∈ {∞, 10, 1, 0.5, 0.1} 的"裁剪+加噪"（拉普拉斯和高斯各一组）。
-     噪声强度基于简单组合定理：假设 T=30 轮，每轮隐私预算 ε_round = ε_total / T。
+  2. 将梯度转换为单步 delta（delta = -lr × g），在 delta 空间施加 DP 裁剪+加噪
+     （与 exp1 FL 训练使用相同的 C 和 ε 范围），再除以 (-lr) 还原到梯度空间。
   3. 对每个带噪梯度跑 GRNN 攻击还原图像。
   4. 输出：
      - 防御对比大图（行=ε 配置，列=真实图/还原图）
      - PSNR 柱状图
      - 简单组合定理预算分配表
+
+注：本实验使用 Sigmoid 激活的 LeNet，而 exp1（FL 训练精度）使用 ReLU 激活。
+    这是技术约束：GRNN 攻击依赖 sigmoid 做二阶梯度反传；sigmoid 在 DP 噪声下
+    梯度消失导致 FL 无法收敛，故 exp1 必须用 ReLU。两组实验的 DP 参数（C、ε、T）
+    完全对齐，但所用模型架构不同，报告中需说明此差异。
 
 运行：
     python -m experiments.exp3_defense
@@ -179,7 +184,8 @@ def main():
 
     print_budget_table(eps_list, args.T)
 
-    # 构造 Sigmoid 版 LeNet，先在训练集上预训练使梯度携带有效信息
+    # Sigmoid LeNet：GRNN 需要 sigmoid 做二阶梯度反传（见 attack/run_attack.py）。
+    # exp1 FL 训练使用 ReLU，原因见 exp1_dp_params.py 注释。
     model = build_lenet(num_classes=10, in_channels=1, act="sigmoid").to(device)
 
     train_set, test_set = get_datasets(args.data_root)
@@ -210,8 +216,11 @@ def main():
         model.eval()
         print(f"Pre-training done ({args.train_iters} steps)")
 
+    local_lr = 0.01  # must match fl/train.py
     true_grad = compute_true_gradient(model, x_real, y_real, device)
-    print(f"True label: {y_real.item()}  Gradient dim: {true_grad.numel()}  Norm: {true_grad.norm().item():.4f}")
+    true_delta = true_grad * (-local_lr)  # 1-step delta, aligned with FL update scale
+    print(f"True label: {y_real.item()}  Gradient dim: {true_grad.numel()}  "
+          f"Gradient norm: {true_grad.norm().item():.4f}  Delta norm: {true_delta.norm().item():.4f}")
     real_vis = denormalize(x_real).cpu()
 
     # ------------------------------------------------------------------
@@ -228,9 +237,11 @@ def main():
             eps_str = "inf (No DP)" if eps is None else f"eps_total={eps}"
             print(f"\n--- {eps_str} ---")
 
-            noisy_grad = noisy_gradient(
-                true_grad.detach(), mechanism, eps, args.T, args.clip_C
-            ).to(device)
+            # Apply DP to delta (C=0.3 aligned with FL), then scale back to gradient space
+            noisy_delta = noisy_gradient(
+                true_delta.detach(), mechanism, eps, args.T, args.clip_C
+            )
+            noisy_grad = (noisy_delta / (-local_lr)).to(device)
 
             result = grnn_attack(
                 model, noisy_grad, batch_size=1,

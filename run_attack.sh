@@ -7,8 +7,8 @@
 #   results/attack/loss_curve.png       — 损失下降曲线
 
 python -m experiments.exp2_attack \
-    --batch_size  10    \
-    --iterations  3000 \
+    --batch_size  1    \
+    --iterations  2000 \
     --tv_alpha    1e-3 \
     --train_iters 0    \
     --seed        0    \

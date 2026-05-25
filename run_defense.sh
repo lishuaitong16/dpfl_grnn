@@ -13,7 +13,7 @@
 
 python -m experiments.exp3_defense \
     --T           30                          \
-    --clip_C      4.5                         \
+    --clip_C      0.3                         \
     --epsilons    inf,2000,10000,50000,200000 \
     --iterations  2000                        \
     --tv_alpha    1e-3                        \

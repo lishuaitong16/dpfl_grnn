@@ -36,6 +36,9 @@ def run_one(mechanism, total_eps, clip_C, rounds, clients, local_epochs,
     client_loaders = make_client_loaders(client_subsets, batch_size)
     test_loader = make_test_loader(test_set)
 
+    # ReLU：sigmoid 在 DP 噪声扰动权重后会饱和，导致 delta 趋近零、FL 无法收敛。
+    # 注：GRNN 攻击（exp2/exp3）需要 sigmoid 激活以支持二阶梯度反传，两者使用不同激活函数
+    # 是技术约束，报告中需说明此差异。
     model = build_lenet(num_classes=10, in_channels=1, act="relu")
     _, acc_hist = federated_train(
         model, client_loaders, test_loader,
