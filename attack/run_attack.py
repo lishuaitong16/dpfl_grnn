@@ -5,7 +5,7 @@
   逼近截获的"真梯度 g"。收敛后 G 的输出即还原图像。
 
 关键点：
-  - 真梯度用 create_graph=True 计算，使后续"损失对 ĝ 的梯度"可二阶反传，
+  - 假梯度用 create_graph=True 计算，使损失可通过梯度运算二阶反传到生成器，
     所以模型激活必须用 Sigmoid（见 models/lenet.py 说明）。
   - 真梯度 g 和假梯度 ĝ 必须用相同参数顺序拉平后比较。
   - 优化器用 RMSprop，lr=1e-4，momentum=0.99（论文设置）。
@@ -46,10 +46,7 @@ def compute_fake_gradient(model, fake_img, fake_label, device):
     这样对生成器可微。
     """
     model = model.to(device)
-    # tanh [-1,1] -> MNIST normalized space, matching how true gradients are computed
-    fake_norm = (fake_img + 1.0) / 2.0
-    fake_norm = (fake_norm - 0.1307) / 0.3081
-    out = model(fake_norm.to(device))
+    out = model(fake_img.to(device))
     log_prob = torch.log_softmax(out, dim=1)
     loss = -(fake_label.to(device) * log_prob).sum(dim=1).mean()
     grads = torch.autograd.grad(loss, list(model.parameters()), create_graph=True)

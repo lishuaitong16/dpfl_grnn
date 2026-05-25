@@ -83,7 +83,9 @@ def privatize(vec: torch.Tensor, mechanism: str, C: float, epsilon: float,
     mechanism = mechanism.lower()
     if mechanism == "none":
         return vec
+    print(f"[DP] grad norm before clip: {vec.norm().item():.4f}  C={C}")
     clipped = clip_update(vec, C)
+    print(f"[DP] grad norm after  clip: {clipped.norm().item():.4f}")
     if mechanism == "laplace":
         return add_laplace_noise(clipped, sensitivity=C, epsilon=epsilon)
     if mechanism == "gaussian":

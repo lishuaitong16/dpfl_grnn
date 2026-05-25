@@ -8,15 +8,10 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
-# MNIST 单通道均值/方差（标准常用值）
-MNIST_MEAN = (0.1307,)
-MNIST_STD = (0.3081,)
-
-# 统一变换：pad 到 32x32 再标准化
+# 统一变换：pad 到 32x32，单通道，像素值 [0,1]
 _transform = transforms.Compose([
-    transforms.Pad(2),                       # 28 -> 32
-    transforms.ToTensor(),
-    transforms.Normalize(MNIST_MEAN, MNIST_STD),
+    transforms.Pad(2),       # 28 -> 32
+    transforms.ToTensor(),   # 1ch, [0,1]
 ])
 
 
@@ -57,7 +52,5 @@ def make_test_loader(test_set, batch_size: int = 256):
 
 
 def denormalize(x):
-    """把标准化后的张量还原回 [0,1] 区间，用于可视化/保存图像。"""
-    mean = torch.tensor(MNIST_MEAN).view(1, -1, 1, 1).to(x.device)
-    std = torch.tensor(MNIST_STD).view(1, -1, 1, 1).to(x.device)
-    return (x * std + mean).clamp(0, 1)
+    """像素值已是 [0,1]，直接截断返回（保留接口兼容性）。"""
+    return x.clamp(0, 1)

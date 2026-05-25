@@ -12,11 +12,12 @@
 #   results/defense/psnr_data.csv        — PSNR 原始数据
 
 python -m experiments.exp3_defense \
-    --T           30                    \
-    --clip_C      1.0                   \
-    --epsilons    inf,10.0,1.0,0.5,0.1 \
-    --iterations  2000                  \
-    --train_iters 300                   \
-    --seed        0                     \
-    --gpu         0                     \
+    --T           30                          \
+    --clip_C      4.5                         \
+    --epsilons    inf,2000,10000,50000,200000 \
+    --iterations  2000                        \
+    --tv_alpha    1e-3                        \
+    --train_iters 0                           \
+    --seed        0                           \
+    --gpu         2                           \
     --outdir      ./results/defense

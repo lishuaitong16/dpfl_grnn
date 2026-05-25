@@ -61,7 +61,7 @@ class GRNNGenerator(nn.Module):
         assert s == target_size, "target_size 必须是 4 的 2 的幂次倍（如 16/32/64）"
 
         # ---- 图像支 ----
-        self.fc_img = nn.Linear(latent_dim, base_ch * 4 * 4)
+        self.fc_img = nn.Linear(latent_dim, base_ch * 4 * 4 * 2)
         blocks = []
         ch = base_ch
         for _ in range(n_blocks):
@@ -70,23 +70,18 @@ class GRNNGenerator(nn.Module):
             ch = out_ch
         self.up_blocks = nn.Sequential(*blocks)
         self.to_img = nn.Conv2d(ch, out_channels, kernel_size=3, stride=1, padding=1)
-        self.tanh = nn.Tanh()
+        self.sigmoid = nn.Sigmoid()
 
-        # ---- 标签支 ----
-        self.fc_label = nn.Sequential(
-            nn.Linear(latent_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_classes),
-        )
+        # ---- 标签支（对齐官方：单层 Linear -> softmax）----
+        self.fc_label = nn.Linear(latent_dim, num_classes)
 
     def forward(self, v):
         # 图像支
-        x = self.fc_img(v).view(v.size(0), -1, 4, 4)
+        x = F.glu(self.fc_img(v).view(v.size(0), -1, 4, 4), dim=1)
         x = self.up_blocks(x)
         x = self.to_img(x)
-        img = self.tanh(x)  # [-1, 1]
+        img = self.sigmoid(x)  # [0, 1]
 
         # 标签支
-        logits = self.fc_label(v)
-        label = F.softmax(logits, dim=1)  # 软标签（概率分布）
+        label = F.softmax(self.fc_label(v), dim=1)
         return img, label

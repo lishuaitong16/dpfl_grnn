@@ -35,10 +35,10 @@ class LeNet(nn.Module):
         self.features = nn.Sequential(
             nn.Conv2d(in_channels, 6, kernel_size=5, stride=1, padding=0),  # -> 6x28x28
             _act(act),
-            nn.AvgPool2d(kernel_size=2, stride=2),                          # -> 6x14x14
+            nn.MaxPool2d(kernel_size=2, stride=2),                          # -> 6x14x14
             nn.Conv2d(6, 16, kernel_size=5, stride=1, padding=0),           # -> 16x10x10
             _act(act),
-            nn.AvgPool2d(kernel_size=2, stride=2),                          # -> 16x5x5
+            nn.MaxPool2d(kernel_size=2, stride=2),                          # -> 16x5x5
         )
         self.classifier = nn.Sequential(
             nn.Linear(16 * 5 * 5, 120),

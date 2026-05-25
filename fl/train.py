@@ -56,6 +56,25 @@ def local_train(model, loader, epochs, lr, device):
     return copy.deepcopy(model.state_dict())
 
 
+def compute_client_gradient(model, loader, device):
+    """取客户端一个样本计算梯度，返回拉平的 1D 向量（不更新模型）。
+
+    与 attack/run_attack.py 中 compute_true_gradient 语义一致（batch_size=1），
+    保证 FL 传输的梯度范数（~4.3）与攻击实验一致，C 可统一设置。
+    """
+    model = model.to(device)
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    x, y = next(iter(loader))
+    x, y = x[:1].to(device), y[:1].to(device)  # 单样本，与攻击实验对齐
+    for p in model.parameters():
+        if p.grad is not None:
+            p.grad.zero_()
+    loss = criterion(model(x), y)
+    loss.backward()
+    return torch.cat([p.grad.reshape(-1) for p in model.parameters()])
+
+
 @torch.no_grad()
 def evaluate(model, test_loader, device):
     """返回测试集准确率（0~1）。"""

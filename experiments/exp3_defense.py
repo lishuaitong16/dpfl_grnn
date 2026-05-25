@@ -45,8 +45,8 @@ def noisy_gradient(true_grad, mechanism, total_eps, T, clip_C, delta=1e-5):
 
 
 def fake_to_vis(fake_img_tensor):
-    """将 GRNN 生成器输出（tanh 范围 [-1,1]）转为 [0,1] 用于显示。"""
-    return ((fake_img_tensor.clamp(-1, 1) + 1) / 2)
+    """将 GRNN 生成器输出（sigmoid 范围 [0,1]）截断后返回。"""
+    return fake_img_tensor.clamp(0, 1)
 
 
 def save_defense_grid(real_img_vis, results_by_eps, eps_list, mech_name, save_path):
@@ -56,27 +56,28 @@ def save_defense_grid(real_img_vis, results_by_eps, eps_list, mech_name, save_pa
     第一行额外展示"无噪声下的还原图"作为攻击成功基准。
     """
     n_rows = len(eps_list)
-    fig, axes = plt.subplots(n_rows, 2, figsize=(5, 2.2 * n_rows))
+    fig, axes = plt.subplots(n_rows, 2, figsize=(5, 2.5 * n_rows))
     if n_rows == 1:
         axes = [axes]
 
     for row, eps in enumerate(eps_list):
-        fake_vis = results_by_eps[eps]["fake_vis"][0]  # 取第 0 个样本
+        fake_vis = results_by_eps[eps]["fake_vis"][0]
         ps = results_by_eps[eps]["psnr"]
-        real_arr = real_img_vis[0].numpy()             # (C,H,W)
-        fake_arr = fake_vis.numpy()
+        real_arr = real_img_vis[0].mean(0).numpy()
+        fake_arr = fake_vis.mean(0).numpy()
 
-        axes[row][0].imshow(real_arr[0], cmap="gray")
-        axes[row][0].set_title("Original", fontsize=8)
-        axes[row][0].axis("off")
+        for ax in axes[row]:
+            ax.axis("off")
 
-        eps_str = "No DP (inf)" if eps is None else f"eps_total={eps}"
-        axes[row][1].imshow(fake_arr[0], cmap="gray")
-        axes[row][1].set_title(f"{eps_str}\nPSNR={ps:.1f}dB", fontsize=8)
-        axes[row][1].axis("off")
+        axes[row][0].imshow(real_arr, cmap="gray")
+        axes[row][0].set_title("Original", fontsize=8, pad=4)
+
+        eps_str = "No DP (inf)" if eps is None else f"ε={eps}"
+        axes[row][1].imshow(fake_arr, cmap="gray")
+        axes[row][1].set_title(f"{eps_str}  PSNR={ps:.1f}dB", fontsize=8, pad=4)
 
     plt.suptitle(f"GRNN Attack vs. DP Defense ({mech_name})", fontsize=10, y=1.01)
-    plt.tight_layout()
+    plt.tight_layout(pad=0.5)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Defense comparison figure saved: {save_path}")
@@ -155,12 +156,13 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--T",          type=int,   default=30,
                    help="联邦学习总轮数（用于简单组合定理）")
-    p.add_argument("--clip_C",     type=float, default=1.0,  help="梯度裁剪范数")
+    p.add_argument("--clip_C",     type=float, default=4.5,  help="梯度裁剪范数")
     p.add_argument("--epsilons",   type=str,   default="inf,10.0,1.0,0.5,0.1",
                    help="ε_total 列表，逗号分隔，'inf' 表示无 DP")
     p.add_argument("--iterations", type=int,   default=5000, help="直接像素攻击迭代次数")
     p.add_argument("--train_iters", type=int,  default=300,
                    help="攻击前在训练集上预训练模型的步数")
+    p.add_argument("--tv_alpha",   type=float, default=1e-3, help="TV 损失权重")
     p.add_argument("--data_root",  type=str,   default="./data")
     p.add_argument("--outdir",     type=str,   default="./results/defense")
     p.add_argument("--seed",       type=int,   default=0)
@@ -182,9 +184,14 @@ def main():
 
     train_set, test_set = get_datasets(args.data_root)
 
+    # 先从训练集取一张图（FL 中梯度来自客户端训练数据）
+    train_loader_single = DataLoader(train_set, batch_size=1, shuffle=True)
+    x_real, y_real = next(iter(train_loader_single))
+    x_real, y_real = x_real.to(device), y_real.to(device)
+
     if args.train_iters > 0:
         train_loader = DataLoader(train_set, batch_size=64, shuffle=True)
-        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        opt = torch.optim.SGD(model.parameters(), lr=0.01)
         crit = nn.CrossEntropyLoss()
         model.train()
         t_iter = iter(train_loader)
@@ -202,10 +209,6 @@ def main():
                 print(f"  Pre-training step {step+1}/{args.train_iters}")
         model.eval()
         print(f"Pre-training done ({args.train_iters} steps)")
-
-    test_loader = make_test_loader(test_set, batch_size=1)
-    x_real, y_real = next(iter(test_loader))
-    x_real, y_real = x_real.to(device), y_real.to(device)
 
     true_grad = compute_true_gradient(model, x_real, y_real, device)
     print(f"True label: {y_real.item()}  Gradient dim: {true_grad.numel()}  Norm: {true_grad.norm().item():.4f}")
@@ -232,7 +235,8 @@ def main():
             result = grnn_attack(
                 model, noisy_grad, batch_size=1,
                 num_classes=10, img_size=32, in_channels=1,
-                iterations=args.iterations, device=device, seed=args.seed,
+                iterations=args.iterations, tv_alpha=args.tv_alpha,
+                device=device, seed=args.seed,
                 verbose=True,
             )
 
