@@ -132,7 +132,7 @@ def main():
     p.add_argument("--local_epochs", type=int,   default=1)
     p.add_argument("--local_lr",     type=float, default=0.01)
     p.add_argument("--batch_size",   type=int,   default=64)
-    p.add_argument("--epsilons",     type=str,   default="1,5,10,50,100,inf",
+    p.add_argument("--epsilons",     type=str,   default="20,50,100,200,500,inf",
                    help="逗号分隔的全局 ε_total 列表，inf 表示无 DP")
     p.add_argument("--data_root",    type=str,   default="./data")
     p.add_argument("--outdir",       type=str,   default="./results")

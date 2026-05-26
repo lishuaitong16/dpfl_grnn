@@ -151,7 +151,7 @@ def save_psnr_csv(results_all, epsilons, path):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--epsilons",    type=str,   default="1,5,10,50,100,inf",
+    p.add_argument("--epsilons",    type=str,   default="20,50,100,200,500,inf",
                    help="逗号分隔的 ε_total 列表，inf 表示无 DP")
     p.add_argument("--iterations",  type=int,   default=5000, help="GRNN 攻击迭代次数")
     p.add_argument("--train_iters", type=int,   default=300,
