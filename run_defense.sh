@@ -12,7 +12,7 @@
 #   results/defense/psnr_data.csv        — PSNR 原始数据
 
 python -m experiments.exp3_defense \
-    --epsilons     20,50,100,200,500,inf \
+    --epsilons     1,5,10,50,100,inf \
     --iterations   2000               \
     --tv_alpha     1e-3               \
     --train_iters  0                  \
