@@ -10,9 +10,9 @@
 #   results/train_stage/stage_data.csv    — 原始数据
 
 python -m experiments.exp4_train_stage \
-    --train_iters_list  0,500,1000,2000,5000,10000,20000,50000 \
-    --iterations        2000                                    \
-    --tv_alpha          1e-3                                    \
-    --seed              0                                       \
-    --gpu               3                                       \
-    --outdir            ./results/train_stage
+    --train_epochs_list  0,1,3,5,10,20,30,50 \
+    --iterations         2000                \
+    --tv_alpha           1e-3                \
+    --seed               0                  \
+    --gpu                3                  \
+    --outdir             ./results/train_stage

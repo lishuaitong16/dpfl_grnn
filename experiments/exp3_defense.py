@@ -1,23 +1,12 @@
-"""阶段五：用差分隐私防御 GRNN 梯度攻击。
+"""阶段五：用物理噪声防御 GRNN 梯度攻击。
 
 流程：
-  1. 取同一张真实 MNIST 图，用 Sigmoid 版 LeNet 计算真实梯度 g。
-  2. 将梯度转换为单步 delta（delta = -lr × g），在 delta 空间施加 DP 裁剪+加噪
-     （与 exp1 FL 训练使用相同的 C 和 ε 范围），再除以 (-lr) 还原到梯度空间。
+  1. 取同一张真实 MNIST 图，用 Sigmoid 版 LeNet 计算单样本真实梯度 g。
+  2. 直接在梯度空间对 g 注入不同标准差的零均值物理噪声，得到 g_hat。
   3. 对每个带噪梯度跑 GRNN 攻击还原图像。
-  4. 输出：
-     - 防御对比大图（行=ε 配置，列=真实图/还原图）
-     - PSNR 柱状图
-     - 简单组合定理预算分配表
+  4. 输出防御对比图、PSNR 柱状图和 CSV。
 
-注：本实验使用 Sigmoid 激活的 LeNet，而 exp1（FL 训练精度）使用 ReLU 激活。
-    这是技术约束：GRNN 攻击依赖 sigmoid 做二阶梯度反传；sigmoid 在 DP 噪声下
-    梯度消失导致 FL 无法收敛，故 exp1 必须用 ReLU。两组实验的 DP 参数（C、ε、T）
-    完全对齐，但所用模型架构不同，报告中需说明此差异。
-
-运行：
-    python -m experiments.exp3_defense
-（在 dpfl_grnn 目录下运行）
+本实验不做梯度裁剪，不计算敏感度，也不使用 epsilon/delta 换算噪声。
 """
 
 import os
@@ -34,19 +23,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.lenet import build_lenet
 from fl.data import get_datasets, make_test_loader, denormalize
-from fl.dp import privatize, per_round_epsilon
+from fl.dp import privatize
 from attack.run_attack import compute_true_gradient, grnn_attack, psnr
 from torch.utils.data import DataLoader
 import torch.nn as nn
 
 
-def noisy_gradient(true_grad, mechanism, total_eps, T, clip_C, delta=1e-5):
-    """对真实梯度施加裁剪+加噪（simulating one round of DP-FL）。"""
-    if total_eps is None:
+def noisy_gradient(true_grad, mechanism, noise_std):
+    """对真实梯度直接注入指定标准差的物理噪声。"""
+    if noise_std == 0:
         return true_grad.clone()
-    eps_round = per_round_epsilon(total_eps, T)
-    return privatize(true_grad.clone(), mechanism=mechanism, C=clip_C,
-                     epsilon=eps_round, delta=delta)
+    return privatize(true_grad.clone(), mechanism=mechanism, noise_std=noise_std)
 
 
 def fake_to_vis(fake_img_tensor):
@@ -54,20 +41,19 @@ def fake_to_vis(fake_img_tensor):
     return fake_img_tensor.clamp(0, 1)
 
 
-def save_defense_grid(real_img_vis, results_by_eps, eps_list, mech_name, save_path):
+def save_defense_grid(real_img_vis, results_by_noise, noise_stds, mech_name, save_path):
     """保存防御对比大图。
 
-    布局：每行 = 一个 ε 配置，两列 = [真实图, 还原图]。
-    第一行额外展示"无噪声下的还原图"作为攻击成功基准。
+    布局：每行 = 一个噪声标准差配置，两列 = [真实图, 还原图]。
     """
-    n_rows = len(eps_list)
+    n_rows = len(noise_stds)
     fig, axes = plt.subplots(n_rows, 2, figsize=(5, 2.5 * n_rows))
     if n_rows == 1:
         axes = [axes]
 
-    for row, eps in enumerate(eps_list):
-        fake_vis = results_by_eps[eps]["fake_vis"][0]
-        ps = results_by_eps[eps]["psnr"]
+    for row, std in enumerate(noise_stds):
+        fake_vis = results_by_noise[std]["fake_vis"][0]
+        ps = results_by_noise[std]["psnr"]
         real_arr = real_img_vis[0].mean(0).numpy()
         fake_arr = fake_vis.mean(0).numpy()
 
@@ -77,20 +63,20 @@ def save_defense_grid(real_img_vis, results_by_eps, eps_list, mech_name, save_pa
         axes[row][0].imshow(real_arr, cmap="gray")
         axes[row][0].set_title("Original", fontsize=8, pad=4)
 
-        eps_str = "No DP (inf)" if eps is None else f"ε={eps}"
+        noise_str = "No noise" if std == 0 else f"std={std:g}"
         axes[row][1].imshow(fake_arr, cmap="gray")
-        axes[row][1].set_title(f"{eps_str}  PSNR={ps:.1f}dB", fontsize=8, pad=4)
+        axes[row][1].set_title(f"{noise_str}  PSNR={ps:.1f}dB", fontsize=8, pad=4)
 
-    plt.suptitle(f"GRNN Attack vs. DP Defense ({mech_name})", fontsize=10, y=1.01)
+    plt.suptitle(f"GRNN Attack vs. Physical Noise Defense ({mech_name})", fontsize=10, y=1.01)
     plt.tight_layout(pad=0.5)
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"Defense comparison figure saved: {save_path}")
 
 
-def save_psnr_bar(psnr_lap, psnr_gau, eps_list, save_path):
+def save_psnr_bar(psnr_lap, psnr_gau, noise_stds, save_path):
     """保存 PSNR 柱状图（拉普拉斯 vs 高斯）。"""
-    labels = ["inf\n(No DP)" if e is None else str(e) for e in eps_list]
+    labels = ["0\n(No noise)" if s == 0 else f"{s:g}" for s in noise_stds]
     x = np.arange(len(labels))
     width = 0.35
 
@@ -105,8 +91,8 @@ def save_psnr_bar(psnr_lap, psnr_gau, eps_list, save_path):
         h = bar.get_height()
         plt.text(bar.get_x() + bar.get_width() / 2, h + 0.3, f"{h:.1f}", ha="center", fontsize=8)
 
-    plt.xticks(x, [f"eps={l}" for l in labels], fontsize=9)
-    plt.xlabel("Total Privacy Budget (eps_total)")
+    plt.xticks(x, [f"std={l}" for l in labels], fontsize=9)
+    plt.xlabel("Physical Noise Std")
     plt.ylabel("PSNR (dB)  [higher = more similar]")
     plt.title("PSNR of GRNN Recovered Images (lower = better DP protection)")
     plt.legend()
@@ -117,53 +103,37 @@ def save_psnr_bar(psnr_lap, psnr_gau, eps_list, save_path):
     print(f"PSNR bar chart saved: {save_path}")
 
 
-def print_budget_table(eps_list, T):
-    """打印简单组合定理预算分配表。"""
-    print("\n" + "=" * 65)
-    print(f"  Composition Theorem Budget Allocation (T={T} rounds, delta=1e-5)")
-    print(f"  {'eps_total':>12}  {'eps_round=eps_total/T':>20}  {'delta_total=T*delta':>20}")
-    print("-" * 65)
-    for eps in eps_list:
-        if eps is None:
-            print(f"  {'inf (No DP)':>12}  {'inf':>20}  {'-':>20}")
-        else:
-            eps_r = per_round_epsilon(eps, T)
-            delta_total = T * 1e-5
-            print(f"  {eps:>12.1f}  {eps_r:>20.4f}  {delta_total:>18.1e}")
-    print("=" * 65 + "\n")
-
-
-def parse_epsilons(s):
-    """解析逗号分隔的 ε 列表，'inf'/'none' 表示无 DP。"""
+def parse_noise_stds(s):
+    """解析逗号分隔的噪声标准差列表，0/inf/none 表示无噪声。"""
     result = []
     for part in s.split(","):
         part = part.strip()
-        if part.lower() in ("none", "inf", "nodp"):
-            result.append(None)
+        if part.lower() in ("none", "inf", "nodp", "nonoise"):
+            result.append(0.0)
         else:
             result.append(float(part))
     return result
 
 
+def noise_label(std):
+    return "No noise" if std == 0 else f"std={std:g}"
+
+
 def save_psnr_csv(results_all, path):
-    """保存各机制、各 ε 下的 PSNR 到 CSV，供后续画图。"""
+    """保存各机制、各噪声标准差下的 PSNR 到 CSV，供后续画图。"""
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["mechanism", "epsilon", "psnr_db"])
-        for mechanism, results_by_eps in results_all.items():
-            for eps, data in results_by_eps.items():
-                eps_str = "inf" if eps is None else str(eps)
-                writer.writerow([mechanism, eps_str, f"{data['psnr']:.4f}"])
+        writer.writerow(["mechanism", "noise_std", "psnr_db"])
+        for mechanism, results_by_noise in results_all.items():
+            for std, data in results_by_noise.items():
+                writer.writerow([mechanism, f"{std:g}", f"{data['psnr']:.4f}"])
     print(f"PSNR data saved: {path}")
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--T",          type=int,   default=30,
-                   help="联邦学习总轮数（用于简单组合定理）")
-    p.add_argument("--clip_C",     type=float, default=4.5,  help="梯度裁剪范数")
-    p.add_argument("--epsilons",   type=str,   default="inf,10.0,1.0,0.5,0.1",
-                   help="ε_total 列表，逗号分隔，'inf' 表示无 DP")
+    p.add_argument("--noise_stds", type=str,   default="1e-1,1e-2,1e-3,1e-4,0",
+                   help="直接注入到真实梯度上的噪声标准差列表，0 表示无噪声")
     p.add_argument("--iterations", type=int,   default=5000, help="直接像素攻击迭代次数")
     p.add_argument("--train_iters", type=int,  default=300,
                    help="攻击前在训练集上预训练模型的步数")
@@ -180,9 +150,8 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    eps_list = parse_epsilons(args.epsilons)
-
-    print_budget_table(eps_list, args.T)
+    noise_stds = parse_noise_stds(args.noise_stds)
+    print("\nNoise std sweep:", ", ".join(noise_label(s) for s in noise_stds))
 
     # Sigmoid LeNet：GRNN 需要 sigmoid 做二阶梯度反传（见 attack/run_attack.py）。
     # exp1 FL 训练使用 ReLU，原因见 exp1_dp_params.py 注释。
@@ -216,32 +185,27 @@ def main():
         model.eval()
         print(f"Pre-training done ({args.train_iters} steps)")
 
-    local_lr = 0.01  # must match fl/train.py
     true_grad = compute_true_gradient(model, x_real, y_real, device)
-    true_delta = true_grad * (-local_lr)  # 1-step delta, aligned with FL update scale
     print(f"True label: {y_real.item()}  Gradient dim: {true_grad.numel()}  "
-          f"Gradient norm: {true_grad.norm().item():.4f}  Delta norm: {true_delta.norm().item():.4f}")
+          f"Gradient norm: {true_grad.norm().item():.4f}")
     real_vis = denormalize(x_real).cpu()
 
     # ------------------------------------------------------------------
-    # 对两种机制分别跑所有 ε 配置
+    # 对两种机制分别跑所有噪声配置
     # ------------------------------------------------------------------
-    results_all = {}  # {mechanism: results_by_eps}  用于 CSV 保存
+    results_all = {}  # {mechanism: results_by_noise}  用于 CSV 保存
     for mech_name, mechanism in [("Laplace", "laplace"), ("Gaussian", "gaussian")]:
         print(f"\n{'='*55}")
         print(f"  Mechanism: {mech_name}")
         print(f"{'='*55}")
 
-        results_by_eps = {}
-        for eps in eps_list:
-            eps_str = "inf (No DP)" if eps is None else f"eps_total={eps}"
-            print(f"\n--- {eps_str} ---")
+        results_by_noise = {}
+        for std in noise_stds:
+            print(f"\n--- {noise_label(std)} ---")
 
-            # Apply DP to delta (C=0.3 aligned with FL), then scale back to gradient space
-            noisy_delta = noisy_gradient(
-                true_delta.detach(), mechanism, eps, args.T, args.clip_C
-            )
-            noisy_grad = (noisy_delta / (-local_lr)).to(device)
+            noisy_grad = noisy_gradient(
+                true_grad.detach(), mechanism, std
+            ).to(device)
 
             result = grnn_attack(
                 model, noisy_grad, batch_size=1,
@@ -255,7 +219,7 @@ def main():
             ps = psnr(real_vis[0], fake_vis[0])
             print(f"PSNR = {ps:.2f} dB")
 
-            results_by_eps[eps] = {
+            results_by_noise[std] = {
                 "fake_vis": fake_vis,
                 "psnr": ps,
             }
@@ -263,29 +227,28 @@ def main():
         # 保存防御对比大图
         mech_tag = "laplace" if mechanism == "laplace" else "gaussian"
         save_defense_grid(
-            real_vis, results_by_eps, eps_list, mech_name,
+            real_vis, results_by_noise, noise_stds, mech_name,
             os.path.join(args.outdir, f"defense_{mech_tag}.png"),
         )
 
-        results_all[mechanism] = results_by_eps
+        results_all[mechanism] = results_by_noise
         # 收集 PSNR 用于柱状图
         if mechanism == "laplace":
-            psnr_lap = [results_by_eps[e]["psnr"] for e in eps_list]
+            psnr_lap = [results_by_noise[s]["psnr"] for s in noise_stds]
         else:
-            psnr_gau = [results_by_eps[e]["psnr"] for e in eps_list]
+            psnr_gau = [results_by_noise[s]["psnr"] for s in noise_stds]
 
     # 保存 PSNR 柱状图
-    save_psnr_bar(psnr_lap, psnr_gau, eps_list,
+    save_psnr_bar(psnr_lap, psnr_gau, noise_stds,
                   os.path.join(args.outdir, "psnr_bar.png"))
 
     # 打印 trade-off 总结
     print("\n" + "=" * 65)
-    print("  Privacy-Utility Trade-off Summary")
-    print(f"  {'eps_total':>12}  {'Laplace PSNR':>14}  {'Gaussian PSNR':>14}")
+    print("  Noise-Robustness Summary")
+    print(f"  {'noise_std':>12}  {'Laplace PSNR':>14}  {'Gaussian PSNR':>14}")
     print("-" * 65)
-    for eps, pl, pg in zip(eps_list, psnr_lap, psnr_gau):
-        eps_str = "inf (No DP)" if eps is None else str(eps)
-        print(f"  {eps_str:>12}  {pl:>14.2f}dB  {pg:>14.2f}dB")
+    for std, pl, pg in zip(noise_stds, psnr_lap, psnr_gau):
+        print(f"  {noise_label(std):>12}  {pl:>14.2f}dB  {pg:>14.2f}dB")
     print("=" * 65)
 
     # 保存原始 PSNR 数据 CSV

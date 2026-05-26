@@ -45,6 +45,7 @@ def main():
     client_loaders = make_client_loaders(client_subsets, args.batch_size)
     test_loader = make_test_loader(test_set)
 
+    # FL 基线使用 ReLU，保证标准 FedAvg 稳定收敛。
     model = build_lenet(num_classes=10, in_channels=1, act="relu")
 
     model, acc_hist = federated_train(
