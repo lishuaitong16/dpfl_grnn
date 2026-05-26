@@ -16,6 +16,6 @@ python -m experiments.exp1_dp_params \
     --local_epochs 1                   \
     --local_lr     0.01                \
     --batch_size   64                  \
-    --epsilons     50,100,200,500,1000,inf \
+    --epsilon_round 1,3,5,10,20,inf \
     --gpu          1                   \
     --outdir       ./results

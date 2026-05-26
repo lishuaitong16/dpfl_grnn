@@ -33,19 +33,15 @@ import torch.nn as nn
 
 CLIP_C   = 1.0
 DELTA_DP = 1e-5
-FL_ROUNDS = 30   # 与 exp1 保持一致，用于换算 ε_round
-
-
-def noisy_gradient(true_grad, mechanism, total_epsilon):
+def noisy_gradient(true_grad, mechanism, epsilon_round):
     """对真实梯度应用 per-round delta DP 噪声（裁剪+加噪）。
 
-    使用单轮预算 ε_round = ε_total / FL_ROUNDS，与 FL 训练中每轮噪声量等价。
-    ε_total=∞ 时返回裁剪后的原始梯度（无噪声）。
+    与 FL 训练中每轮施加的噪声量完全等价：同一个 ε_round、C、δ。
+    ε_round=∞ 时返回原始梯度（无噪声）。
     """
     g = true_grad.clone()
-    if math.isinf(total_epsilon):
+    if math.isinf(epsilon_round):
         return g
-    epsilon_round = total_epsilon / FL_ROUNDS
     return privatize(g, mechanism, epsilon_round, CLIP_C, DELTA_DP)
 
 
@@ -54,7 +50,7 @@ def fake_to_vis(fake_img_tensor):
 
 
 def eps_label(eps):
-    return "No DP" if math.isinf(eps) else f"ε={eps:g}"
+    return "No DP" if math.isinf(eps) else f"ε_r={eps:g}"
 
 
 def save_defense_grid(real_img_vis, results_by_eps, epsilons, mech_name, save_path):
@@ -104,7 +100,7 @@ def save_psnr_bar(psnr_lap, psnr_gau, epsilons, save_path):
         plt.text(bar.get_x() + bar.get_width() / 2, h + 0.3, f"{h:.1f}", ha="center", fontsize=8)
 
     plt.xticks(x, labels, fontsize=9)
-    plt.xlabel("Privacy Budget  ε_total")
+    plt.xlabel("Per-round Privacy Budget  ε_round")
     plt.ylabel("PSNR (dB)  [higher = more similar to original]")
     plt.title("PSNR of GRNN Recovered Images under DP Defense\n"
               f"(C={CLIP_C}, δ={DELTA_DP}, lower PSNR = better protection)")
@@ -129,30 +125,23 @@ def parse_epsilons(s):
 
 
 def save_psnr_csv(results_all, epsilons, path):
-    """保存各机制、各 ε 下的 PSNR 和噪声标准差到 CSV。"""
+    """保存各机制、各 ε_round 下的 PSNR 和噪声标准差到 CSV。"""
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["mechanism", "epsilon_total", "epsilon_round", "noise_std", "psnr_db"])
+        writer.writerow(["mechanism", "epsilon_round", "noise_std", "psnr_db"])
         for mechanism, results_by_eps in results_all.items():
             for eps, data in results_by_eps.items():
                 eps_str = "inf" if math.isinf(eps) else f"{eps:g}"
-                if math.isinf(eps):
-                    eps_r_str = "inf"
-                    sigma_str = "0"
-                else:
-                    eps_r = eps / FL_ROUNDS
-                    sigma = noise_std_from_epsilon(mechanism, eps_r, CLIP_C, DELTA_DP)
-                    eps_r_str = f"{eps_r:.4f}"
-                    sigma_str = f"{sigma:.4f}"
-                writer.writerow([mechanism, eps_str, eps_r_str, sigma_str,
-                                 f"{data['psnr']:.4f}"])
+                sigma_str = "0" if math.isinf(eps) else \
+                    f"{noise_std_from_epsilon(mechanism, eps, CLIP_C, DELTA_DP):.4f}"
+                writer.writerow([mechanism, eps_str, sigma_str, f"{data['psnr']:.4f}"])
     print(f"PSNR data saved: {path}")
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--epsilons",    type=str,   default="1,5,10,50,100,inf",
-                   help="逗号分隔的 ε_total 列表，inf 表示无 DP")
+    p.add_argument("--epsilon_round", type=str,  default="0.1,0.5,1,5,10,inf",
+                   help="逗号分隔的每轮隐私预算 ε_round 列表，inf 表示无 DP")
     p.add_argument("--iterations",  type=int,   default=5000, help="GRNN 攻击迭代次数")
     p.add_argument("--train_iters", type=int,   default=300,
                    help="攻击前在训练集上预训练模型的步数")
@@ -169,8 +158,8 @@ def main():
     os.makedirs(args.outdir, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    epsilons = parse_epsilons(args.epsilons)
-    print("\nε_total sweep:", ", ".join(eps_label(e) for e in epsilons))
+    epsilons = parse_epsilons(args.epsilon_round)
+    print("\nε_round sweep:", ", ".join(eps_label(e) for e in epsilons))
 
     # Sigmoid LeNet：GRNN 需要 sigmoid 做二阶梯度反传。
     model = build_lenet(num_classes=10, in_channels=1, act="sigmoid").to(device)
@@ -211,20 +200,19 @@ def main():
     # ------------------------------------------------------------------
     # 打印噪声参数对照表
     # ------------------------------------------------------------------
-    print(f"\n{'='*70}")
-    print(f"  DP 参数表  C={CLIP_C}  δ={DELTA_DP}  FL_ROUNDS={FL_ROUNDS}")
-    print(f"  {'ε_total':>10}  {'ε_round':>10}  {'σ_Lap':>10}  {'σ_Gau':>10}  {'SNR_Lap':>10}")
-    print(f"  {'-'*60}")
+    print(f"\n{'='*65}")
+    print(f"  DP 参数表  C={CLIP_C}  δ={DELTA_DP}")
+    print(f"  {'ε_round':>10}  {'σ_Lap':>10}  {'σ_Gau':>10}  {'SNR_Lap':>10}")
+    print(f"  {'-'*50}")
     for eps in epsilons:
         if math.isinf(eps):
-            print(f"  {'∞':>10}  {'∞':>10}  {'0':>10}  {'0':>10}  {'∞':>10}")
+            print(f"  {'∞':>10}  {'0':>10}  {'0':>10}  {'∞':>10}")
         else:
-            eps_r = eps / FL_ROUNDS
-            sigma_lap = noise_std_from_epsilon("laplace",  eps_r, CLIP_C, DELTA_DP)
-            sigma_gau = noise_std_from_epsilon("gaussian", eps_r, CLIP_C, DELTA_DP)
+            sigma_lap = noise_std_from_epsilon("laplace",  eps, CLIP_C, DELTA_DP)
+            sigma_gau = noise_std_from_epsilon("gaussian", eps, CLIP_C, DELTA_DP)
             snr = true_norm / sigma_lap if sigma_lap > 0 else float("inf")
-            print(f"  {eps:>10g}  {eps_r:>10.4f}  {sigma_lap:>10.4f}  {sigma_gau:>10.4f}  {snr:>10.4f}")
-    print(f"{'='*70}\n")
+            print(f"  {eps:>10g}  {sigma_lap:>10.4f}  {sigma_gau:>10.4f}  {snr:>10.4f}")
+    print(f"{'='*65}\n")
 
     # ------------------------------------------------------------------
     # 对两种机制分别跑所有 ε 配置

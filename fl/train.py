@@ -88,30 +88,34 @@ def federated_train(
     local_epochs: int = 1,
     local_lr: float = 0.01,
     device: str = "cuda",
-    mechanism: str = "none",          # "none" | "laplace" | "gaussian"
-    total_epsilon: float = float("inf"),  # ε_total；∞ 表示不加噪
-    clip_C: float = 1.0,              # L2 裁剪范数
-    delta_dp: float = 1e-5,           # (ε,δ)-DP 的 δ（Gaussian only）
+    mechanism: str = "none",            # "none" | "laplace" | "gaussian"
+    epsilon_round: float = float("inf"),  # 每轮隐私预算 ε_round；∞ 表示不加噪
+    clip_C: float = 1.0,                # L2 裁剪范数
+    delta_dp: float = 1e-5,             # (ε,δ)-DP 的 δ（Gaussian only）
     verbose: bool = True,
 ):
     """运行联邦学习，返回 (global_model, acc_history)。
 
     acc_history: 每轮结束后的测试精度列表，用于画"精度 vs 轮数"曲线。
+
+    DP 参数说明（per-round sequential composition）：
+        epsilon_round : 每轮隐私预算 ε_round，总预算 ε_total = rounds × ε_round
+        clip_C        : L2 裁剪范数，即灵敏度上界 Δf = C
+        delta_dp      : (ε,δ)-DP 的失败概率 δ（Gaussian only）
     """
     global_model = global_model.to(device)
     acc_history = []
 
-    use_dp = (mechanism != "none") and (not math.isinf(total_epsilon))
+    use_dp = (mechanism != "none") and (not math.isinf(epsilon_round))
     if use_dp:
-        epsilon_round = total_epsilon / rounds
         sigma_lap = noise_std_from_epsilon("laplace",  epsilon_round, clip_C, delta_dp)
         sigma_gau = noise_std_from_epsilon("gaussian", epsilon_round, clip_C, delta_dp)
         if verbose:
-            print(f"[DP] 机制={mechanism}  ε_total={total_epsilon}  "
-                  f"ε_round={epsilon_round:.4f}  C={clip_C}  δ={delta_dp}")
+            print(f"[DP] 机制={mechanism}  ε_round={epsilon_round}  "
+                  f"ε_total={epsilon_round * rounds:.2f}  C={clip_C}  δ={delta_dp}")
             print(f"     σ_Lap={sigma_lap:.4f}  σ_Gau={sigma_gau:.4f}")
     elif verbose and mechanism != "none":
-        print(f"[DP] 机制={mechanism}  ε_total=∞（无噪声基线）")
+        print(f"[DP] 机制={mechanism}  ε_round=∞（无噪声基线）")
 
     for r in range(1, rounds + 1):
         global_state = global_model.state_dict()
@@ -125,7 +129,6 @@ def federated_train(
             delta = local_vec - global_vec
 
             if use_dp:
-                epsilon_round = total_epsilon / rounds
                 delta = privatize(delta, mechanism, epsilon_round, clip_C, delta_dp)
 
             delta_sum += delta
