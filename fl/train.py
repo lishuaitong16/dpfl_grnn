@@ -1,20 +1,28 @@
-"""FedAvg 联邦学习主循环，支持 DP-SGD 风格的梯度噪声注入。
+"""FedAvg 联邦学习主循环，支持 per-round delta DP。
 
 流程（每个通信轮）：
     1. 服务器把当前全局模型下发给各客户端；
-    2. 客户端本地训练：每步 loss.backward() 后、optimizer.step() 前对梯度加噪；
+    2. 客户端本地训练（纯 SGD，无噪声）；
     3. 客户端上传 delta = 训练后参数 - 全局参数；
-    4. 服务器平均所有 delta，更新全局模型；
-    5. 在测试集上评估全局模型精度。
+    4. 服务器对每个 delta 做 per-round DP：先裁剪到 L2 球 C，再加校准噪声；
+    5. 服务器平均所有（加噪后）delta，更新全局模型；
+    6. 在测试集上评估全局模型精度。
 
 无噪声时（mechanism="none"）即标准 FedAvg 基线。
+
+DP 参数说明（per-round sequential composition）：
+    total_epsilon : 全局隐私预算 ε_total（∞ 表示无 DP）
+    clip_C        : L2 裁剪范数，即灵敏度上界 Δf = C
+    delta_dp      : (ε,δ)-DP 的失败概率 δ（Gaussian only）
+    每轮预算      : ε_round = ε_total / rounds
 """
 
 import copy
+import math
 import torch
 import torch.nn as nn
 
-from .dp import privatize
+from .dp import privatize, noise_std_from_epsilon
 
 
 # ---------------------------------------------------------------------------
@@ -37,10 +45,10 @@ def vector_to_params(vec, reference_state_dict):
 
 
 # ---------------------------------------------------------------------------
-# 本地训练（含可选梯度噪声）
+# 本地训练（纯 SGD，不加噪声）
 # ---------------------------------------------------------------------------
-def local_train(model, loader, epochs, lr, device, mechanism="none", noise_std=0.0):
-    """客户端本地训练，每步梯度算完后可选加噪再 step。"""
+def local_train(model, loader, epochs, lr, device):
+    """客户端本地训练，返回训练后的 state_dict。"""
     model = model.to(device)
     model.train()
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
@@ -51,14 +59,6 @@ def local_train(model, loader, epochs, lr, device, mechanism="none", noise_std=0
             optimizer.zero_grad()
             loss = criterion(model(x), y)
             loss.backward()
-            if mechanism != "none":
-                flat = torch.cat([p.grad.reshape(-1) for p in model.parameters()])
-                flat = privatize(flat, mechanism=mechanism, noise_std=noise_std)
-                offset = 0
-                for p in model.parameters():
-                    numel = p.grad.numel()
-                    p.grad.data = flat[offset:offset + numel].reshape(p.grad.shape)
-                    offset += numel
             optimizer.step()
     return copy.deepcopy(model.state_dict())
 
@@ -88,8 +88,10 @@ def federated_train(
     local_epochs: int = 1,
     local_lr: float = 0.01,
     device: str = "cuda",
-    mechanism: str = "none",   # "none" | "laplace" | "gaussian"
-    noise_std: float = 0.0,    # 注入到每步梯度上的物理噪声标准差
+    mechanism: str = "none",          # "none" | "laplace" | "gaussian"
+    total_epsilon: float = float("inf"),  # ε_total；∞ 表示不加噪
+    clip_C: float = 1.0,              # L2 裁剪范数
+    delta_dp: float = 1e-5,           # (ε,δ)-DP 的 δ（Gaussian only）
     verbose: bool = True,
 ):
     """运行联邦学习，返回 (global_model, acc_history)。
@@ -99,8 +101,17 @@ def federated_train(
     global_model = global_model.to(device)
     acc_history = []
 
-    if mechanism != "none" and verbose:
-        print(f"[Noise] 机制={mechanism}  grad_noise_std={noise_std:g}  不裁剪")
+    use_dp = (mechanism != "none") and (not math.isinf(total_epsilon))
+    if use_dp:
+        epsilon_round = total_epsilon / rounds
+        sigma_lap = noise_std_from_epsilon("laplace",  epsilon_round, clip_C, delta_dp)
+        sigma_gau = noise_std_from_epsilon("gaussian", epsilon_round, clip_C, delta_dp)
+        if verbose:
+            print(f"[DP] 机制={mechanism}  ε_total={total_epsilon}  "
+                  f"ε_round={epsilon_round:.4f}  C={clip_C}  δ={delta_dp}")
+            print(f"     σ_Lap={sigma_lap:.4f}  σ_Gau={sigma_gau:.4f}")
+    elif verbose and mechanism != "none":
+        print(f"[DP] 机制={mechanism}  ε_total=∞（无噪声基线）")
 
     for r in range(1, rounds + 1):
         global_state = global_model.state_dict()
@@ -109,10 +120,15 @@ def federated_train(
         delta_sum = torch.zeros_like(global_vec)
         for loader in client_loaders:
             local_model = copy.deepcopy(global_model)
-            local_state = local_train(local_model, loader, local_epochs, local_lr, device,
-                                      mechanism=mechanism, noise_std=noise_std)
+            local_state = local_train(local_model, loader, local_epochs, local_lr, device)
             local_vec = params_to_vector(local_state)
-            delta_sum += local_vec - global_vec
+            delta = local_vec - global_vec
+
+            if use_dp:
+                epsilon_round = total_epsilon / rounds
+                delta = privatize(delta, mechanism, epsilon_round, clip_C, delta_dp)
+
+            delta_sum += delta
 
         new_vec = global_vec + delta_sum / len(client_loaders)
         global_model.load_state_dict(vector_to_params(new_vec, global_state))
