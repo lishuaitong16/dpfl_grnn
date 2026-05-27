@@ -39,7 +39,6 @@
 """
 
 import math
-import warnings
 import numpy as np
 import torch
 from scipy.optimize import fsolve
@@ -80,16 +79,10 @@ def gaussian_mechanism(epsilon: float, delta: float,
     标准差 σ = sqrt(2 * ln(1.25/δ)) * sensitivity / ε。
     返回 numpy 数组，形状为 size。
 
-    注意：严格意义上该公式要求 ε < 1；本函数对 ε≥1 发出警告而不中止，
-    以允许实验参数扫描（此时 DP 约束仍成立但界不是最优的）。
+    官方 dp_mechanism.py 要求 epsilon < 1 并在 ε≥1 时抛异常；
+    本实现允许 ε≥1（实验扫描时有意使用大 ε 展示隐私-效用权衡），
+    公式本身在此范围仍然有效，只是严格 DP 界不是最优的。
     """
-    if epsilon >= 1:
-        warnings.warn(
-            f"gaussian_mechanism: epsilon={epsilon} >= 1，"
-            "Gaussian 机制的标准公式在此范围外 DP 保证较宽松。"
-            "建议使用组合定理将总预算拆为多轮（per-round ε < 1）。",
-            UserWarning, stacklevel=2,
-        )
     noise_scale = math.sqrt(2 * math.log(1.25 / delta)) * sensitivity / epsilon
     return np.random.normal(0, noise_scale, size=size)
 
