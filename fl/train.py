@@ -29,6 +29,8 @@ from .dp import (
     clip_gradient,
     add_dp_noise_torch,
     renyi_gaussian_mechanism,
+    per_sample_clip_grads,
+    add_noise_to_params,
 )
 
 
@@ -57,17 +59,103 @@ def vector_to_params(vec: torch.Tensor, reference_state_dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def local_train(model, loader, epochs: int, lr: float, device: str):
-    """客户端本地训练，返回训练后的 state_dict（deep copy）。"""
+    """客户端本地训练（无 DP），返回训练后的 state_dict（deep copy）。"""
     model = model.to(device)
     model.train()
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-    criterion = nn.CrossEntropyLoss()
+    criterion  = nn.CrossEntropyLoss()
     for _ in range(epochs):
         for x, y in loader:
             x, y = x.to(device), y.to(device)
             optimizer.zero_grad()
             criterion(model(x), y).backward()
             optimizer.step()
+    return copy.deepcopy(model.state_dict())
+
+
+def local_train_dp_sgd(
+    model,
+    loader,
+    epochs:     int,
+    lr:         float,
+    device:     str,
+    mechanism:  str,
+    epsilon:    float,
+    clip_C:     float,
+    delta_dp:   float = 1e-5,
+    dp_composition: str = "none",
+    dp_alpha:   float = 4.0,
+) -> dict:
+    """DP-SGD 本地训练，完全对齐官方 client/Update.py。
+
+    每个 batch 做 per-sample gradient clipping（使用 torch.func.vmap+grad，
+    无需 Opacus），训练结束后对模型参数加一次 DP 噪声。
+
+    对齐官方的关键细节：
+      • 每批裁剪阈值 = clip_C / epochs（官方 dp_clip / local_ep）
+        确保整个本地训练累积的灵敏度上界为 clip_C
+      • Laplace → L1 范数裁剪；Gaussian → L2 范数裁剪
+      • 噪声加到每个参数层（独立地，与官方 add_noise 一致）
+      • sensitivity = cal_client_sensitivity(lr, clip_C, N)
+
+    Args:
+        model:      训练前的全局模型（in-place 训练，不影响原模型，
+                    因 federated_train 里已经 deepcopy）。
+        loader:     客户端数据 DataLoader。
+        epochs:     本地训练轮数。
+        lr:         学习率。
+        device:     设备字符串。
+        mechanism:  "laplace" 或 "gaussian"。
+        epsilon:    per-round 隐私预算 ε_round。
+        clip_C:     总裁剪阈值（官方 dp_clip）。
+        delta_dp:   (ε,δ)-DP 的 δ（Gaussian only）。
+        dp_composition: 组合方式（"renyi" 时使用 Rényi Gaussian 噪声）。
+        dp_alpha:   Rényi order α（仅 renyi 时使用）。
+
+    Returns:
+        训练 + 加噪后的 state_dict（deep copy）。
+    """
+    from .dp import renyi_gaussian_mechanism as _renyi_mech
+
+    model = model.to(device)
+    model.train()
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+
+    # 每 epoch 的裁剪阈值 = clip_C / epochs（对齐官方 dp_clip / local_ep）
+    clip_per_epoch = clip_C / max(epochs, 1)
+    clip_norm = 1 if mechanism == "laplace" else 2
+
+    for _ in range(epochs):
+        for x, y in loader:
+            x, y = x.to(device), y.to(device)
+
+            # ── per-sample 裁剪（对齐官方 perSampleClip）──
+            clipped_grads = per_sample_clip_grads(
+                model, x, y, clip_per_epoch, clip_norm=clip_norm)
+
+            # ── 把裁剪后的梯度写回模型，执行 SGD step ──
+            optimizer.zero_grad()
+            for name, param in model.named_parameters():
+                param.grad = clipped_grads[name].to(param.dtype)
+            optimizer.step()
+
+    # ── 训练结束后对参数加一次噪声（对齐官方 add_noise）──
+    n_samples   = len(loader.dataset)
+    sensitivity = cal_client_sensitivity(lr, clip_C, n_samples)
+
+    if dp_composition == "renyi":
+        # Rényi Gaussian
+        with torch.no_grad():
+            for param in model.parameters():
+                noise_np = _renyi_mech(
+                    alpha=dp_alpha, epsilon=epsilon,
+                    sensitivity=sensitivity, size=tuple(param.shape))
+                noise = torch.from_numpy(noise_np).to(
+                    device=param.device, dtype=param.dtype)
+                param.data += noise
+    else:
+        add_noise_to_params(model, mechanism, epsilon, sensitivity, delta_dp)
+
     return copy.deepcopy(model.state_dict())
 
 
@@ -93,32 +181,36 @@ def federated_train(
     global_model,
     client_loaders,
     test_loader,
-    rounds:         int   = 30,
-    local_epochs:   int   = 1,
-    local_lr:       float = 0.01,
-    device:         str   = "cuda",
-    mechanism:      str   = "none",              # "none" | "laplace" | "gaussian"
-    epsilon_round:  float = float("inf"),        # 每轮隐私预算 ε_round；∞ 表示不加噪
-    clip_C:         float = 9.0,                 # 梯度裁剪范数（L2），即 Δf 上界
-    delta_dp:       float = 1e-5,                # (ε,δ)-DP 的 δ（Gaussian only）
-    verbose:        bool  = True,
-    # Rényi DP 扩展参数（由 renyi_gaussian_composition 返回后传入）
-    dp_composition: str   = "none",              # "none" | "simple" | "advanced" | "renyi"
-    dp_alpha:       float = 4.0,                 # Rényi order α（仅 renyi 时使用）
+    rounds:           int   = 30,
+    local_epochs:     int   = 1,
+    local_lr:         float = 0.01,
+    device:           str   = "cuda",
+    mechanism:        str   = "none",          # "none" | "laplace" | "gaussian"
+    epsilon_round:    float = float("inf"),    # 每轮隐私预算；∞ 表示不加噪
+    clip_C:           float = 9.0,             # 裁剪阈值（对应官方 dp_clip）
+    delta_dp:         float = 1e-5,            # (ε,δ)-DP 的 δ（Gaussian only）
+    verbose:          bool  = True,
+    dp_composition:   str   = "none",          # "none"|"simple"|"advanced"|"renyi"
+    dp_alpha:         float = 4.0,             # Rényi order α
+    # ── DP 方式选择 ──────────────────────────────────────────────────────
+    per_sample_clip:  bool  = False,
+    # False（默认）：delta 整体裁剪（输出扰动，不需要 Opacus）
+    # True          ：per-sample gradient clipping（对齐官方，使用 torch.func）
+    #                 每 batch 做 per-sample 裁剪，训练后加一次噪声
 ):
     """运行 FedAvg 联邦学习，返回 (global_model, acc_history)。
 
-    DP 应用逻辑（对齐官方 client/Update.py add_noise）：
-      1. 客户端本地训练得到 local_state
-      2. 计算参数更新量 delta = local_vec - global_vec
-      3. 将 delta 裁剪到 L2 球半径 clip_C（bound L2 sensitivity）
-      4. 计算敏感度 sensitivity = cal_client_sensitivity(local_lr, clip_C, N)
-         其中 N = len(loader.dataset)（客户端本地样本数）
-      5. 用 laplace_mechanism 或 gaussian_mechanism 生成噪声并加到 delta
-      6. 服务端聚合：θ_global += mean(noisy_delta)
+    ─── per_sample_clip=False（默认，输出扰动）────────────────────────────
+    1. 本地正常训练（无裁剪）→ 得到 local_params
+    2. delta = local_params - global_params
+    3. 裁剪 delta（Laplace→L1，Gaussian→L2）
+    4. 加 DP 噪声（sensitivity = cal_client_sensitivity(lr, C, N)）
+    5. 服务端聚合 θ' = θ + mean(noisy_delta)
 
-    Args:
-        acc_history: 每轮测试精度列表（0~1），用于画"精度 vs 轮数"曲线。
+    ─── per_sample_clip=True（完全对齐官方 client/Update.py）─────────────
+    1. 每 batch：per-sample gradient clipping（clip_C/epochs，torch.func vmap）
+    2. 训练结束后：add_noise_to_params（每层独立加噪，对齐官方 add_noise）
+    3. 服务端聚合 θ' = θ + mean(local_params - global_params)
     """
     global_model = global_model.to(device)
     acc_history  = []
@@ -126,51 +218,57 @@ def federated_train(
     use_dp = (mechanism != "none") and (not math.isinf(epsilon_round))
 
     if use_dp and verbose:
-        # 以第一个 loader 的数据集大小为代表打印参数
-        n0 = len(client_loaders[0].dataset)
-        s0 = cal_client_sensitivity(local_lr, clip_C, n0)
-        print(f"[DP] 机制={mechanism}  ε_round={epsilon_round}  "
+        n0   = len(client_loaders[0].dataset)
+        s0   = cal_client_sensitivity(local_lr, clip_C, n0)
+        mode = "per-sample-clip" if per_sample_clip else "delta-clip"
+        print(f"[DP] 机制={mechanism}  ε_round={epsilon_round:.4g}  "
               f"ε_total={epsilon_round * rounds:.2f}  C={clip_C}  δ={delta_dp}")
-        print(f"     sensitivity(lr={local_lr}, clip={clip_C}, N={n0}) = {s0:.6f}")
+        print(f"     模式={mode}  "
+              f"sensitivity(lr={local_lr},C={clip_C},N={n0})={s0:.2e}")
     elif verbose and mechanism != "none":
         print(f"[DP] 机制={mechanism}  ε_round=∞（无噪声基线）")
 
     for r in range(1, rounds + 1):
         global_state = global_model.state_dict()
         global_vec   = params_to_vector(global_state)
-
-        delta_sum = torch.zeros_like(global_vec)
+        delta_sum    = torch.zeros_like(global_vec)
 
         for loader in client_loaders:
-            # ---- 本地训练 ----
             local_model = copy.deepcopy(global_model)
-            local_state = local_train(local_model, loader,
-                                      local_epochs, local_lr, device)
+
+            # ──────────────────────────────────────────────────────────────
+            if use_dp and per_sample_clip:
+                # 模式 B：per-sample gradient clipping（完全对齐官方）
+                local_state = local_train_dp_sgd(
+                    local_model, loader,
+                    epochs=local_epochs, lr=local_lr, device=device,
+                    mechanism=mechanism, epsilon=epsilon_round,
+                    clip_C=clip_C, delta_dp=delta_dp,
+                    dp_composition=dp_composition, dp_alpha=dp_alpha,
+                )
+            else:
+                # 模式 A：正常训练
+                local_state = local_train(
+                    local_model, loader, local_epochs, local_lr, device)
+            # ──────────────────────────────────────────────────────────────
+
             delta = params_to_vector(local_state) - global_vec
 
-            # ---- DP 扰动（对齐官方 client/Update.py） ----
-            if use_dp:
-                # 1. 裁剪 delta，限制灵敏度（对齐官方 perSampleClip norm 选择）
-                #    Laplace  → L1 范数裁剪（官方 norm=1）
-                #    Gaussian → L2 范数裁剪（官方 norm=2）
-                clip_norm = 1 if mechanism == "laplace" else 2
-                delta = clip_gradient(delta, clip_C, norm=clip_norm)
-
-                # 2. 计算敏感度（与官方 cal_client_sensitivity 公式完全一致）
+            # 模式 A 的 DP 扰动（delta-clip + 噪声）
+            if use_dp and not per_sample_clip:
+                clip_norm   = 1 if mechanism == "laplace" else 2
+                delta       = clip_gradient(delta, clip_C, norm=clip_norm)
                 n_samples   = len(loader.dataset)
                 sensitivity = cal_client_sensitivity(local_lr, clip_C, n_samples)
 
-                # 3. 加噪（Laplace / Gaussian / Rényi Gaussian）
                 if mechanism == "laplace":
                     delta = add_dp_noise_torch(
                         delta, "laplace", epsilon_round, sensitivity, delta_dp)
                 elif mechanism == "gaussian":
                     if dp_composition == "renyi":
-                        # Rényi Gaussian 机制（须预先调用 renyi_gaussian_composition）
                         noise_np = renyi_gaussian_mechanism(
                             alpha=dp_alpha, epsilon=epsilon_round,
-                            sensitivity=sensitivity,
-                            size=tuple(delta.shape))
+                            sensitivity=sensitivity, size=tuple(delta.shape))
                         noise = torch.from_numpy(noise_np).to(
                             device=delta.device, dtype=delta.dtype)
                         delta = delta + noise
@@ -180,11 +278,10 @@ def federated_train(
 
             delta_sum += delta
 
-        # ---- 服务端聚合 ----
+        # 服务端聚合
         new_vec = global_vec + delta_sum / len(client_loaders)
         global_model.load_state_dict(vector_to_params(new_vec, global_state))
 
-        # ---- 评估 ----
         acc = evaluate(global_model, test_loader, device)
         acc_history.append(acc)
         if verbose:
