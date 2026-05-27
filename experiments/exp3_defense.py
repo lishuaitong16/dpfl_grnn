@@ -165,8 +165,7 @@ def save_psnr_csv(results_all, epsilons, clip_C, local_lr, path):
                     b_str, s_str = "0", "0"
                 else:
                     b_str = f"{sensitivity / eps:.6f}"               # Laplace scale
-                    import math as _m
-                    sigma = _m.sqrt(2 * _m.log(1.25 / DELTA_DP)) * sensitivity / eps
+                    sigma = math.sqrt(2 * math.log(1.25 / DELTA_DP)) * sensitivity / eps
                     s_str = f"{sigma:.6f}"                            # Gaussian std
                 writer.writerow([
                     mechanism, eps_str, f"{sensitivity:.6f}",

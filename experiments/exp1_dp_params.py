@@ -159,15 +159,18 @@ def print_summary_table(acc_dict_lap, acc_dict_gau, epsilons):
     print("=" * 72 + "\n")
 
 
-def save_csv(lap_acc, gau_acc, epsilons, rounds, path):
+def save_csv(lap_acc, gau_acc, lap_epsilons, gau_epsilons, rounds, path):
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow([
             "experiment", "mechanism", "epsilon_round",
             "epsilon_total", "round", "accuracy",
         ])
-        for mechanism, acc_dict in (("laplace", lap_acc), ("gaussian", gau_acc)):
-            for eps in epsilons:
+        for mechanism, acc_dict, eps_list in (
+            ("laplace",  lap_acc, lap_epsilons),
+            ("gaussian", gau_acc, gau_epsilons),
+        ):
+            for eps in eps_list:
                 eps_str       = "inf" if math.isinf(eps) else f"{eps:g}"
                 eps_total_str = "inf" if math.isinf(eps) else f"{eps * rounds:g}"
                 for r, acc in enumerate(acc_dict[eps], 1):
@@ -197,8 +200,11 @@ def main():
                    help="L2 裁剪范数（delta 敏感度上界）")
 
     # ── 预算模式 A：直接指定每轮 ε（默认）──
-    p.add_argument("--epsilon_round", type=str, default="1,3,5,10,20,inf",
-                   help="[模式A] 逗号分隔的每轮隐私预算 ε_round，inf 表示无 DP")
+    p.add_argument("--epsilon_round", type=str, default="10,25,50,75,100,inf",
+                   help="[模式A] Laplace 机制每轮隐私预算，逗号分隔，inf 表示无 DP")
+    p.add_argument("--epsilon_round_gaussian", type=str, default="1,5,10,20,30,inf",
+                   help="[模式A] Gaussian 机制每轮隐私预算，逗号分隔；"
+                        "未指定时自动使用 --epsilon_round")
 
     # ── 预算模式 B：总预算 + 组合定理（对齐官方 Fed.py）──
     p.add_argument("--total_epsilon", type=str, default=None,
@@ -246,16 +252,23 @@ def main():
             print(f"  {t_str:>10}  {r_str:>12}  {a_str:>12}")
 
         dp_alpha_map = {cfg[1]: cfg[2] for cfg in eps_configs}
+        gau_epsilons     = epsilons          # 模式 B：高斯与 Laplace 共用同一组合列表
+        gau_dp_alpha_map = dp_alpha_map
     else:
-        # 模式 A：直接使用每轮 ε
-        epsilons     = parse_epsilons(args.epsilon_round)
-        dp_alpha_map = {eps: None for eps in epsilons}
-        print(f"\n[模式A] 每轮预算 ε_round 列表：{[eps_label(e) for e in epsilons]}")
+        # 模式 A：直接使用每轮 ε（Laplace 与 Gaussian 可独立配置）
+        epsilons         = parse_epsilons(args.epsilon_round)
+        dp_alpha_map     = {eps: None for eps in epsilons}
+        gau_epsilons     = parse_epsilons(args.epsilon_round_gaussian)
+        gau_dp_alpha_map = {eps: None for eps in gau_epsilons}
+        print(f"\n[模式A] Laplace  ε_round 列表：{[eps_label(e) for e in epsilons]}")
+        print(f"[模式A] Gaussian ε_round 列表：{[eps_label(e) for e in gau_epsilons]}")
 
     # 估算每客户端样本数（用于参数表）
     n_per_client = 60000 // args.clients  # MNIST 训练集 60000 张
 
-    print_param_table(epsilons, args.rounds, args.clip_C,
+    # 合并去重（保持顺序）用于参数对照表展示
+    all_epsilons = list(dict.fromkeys(epsilons + gau_epsilons))
+    print_param_table(all_epsilons, args.rounds, args.clip_C,
                       args.local_lr, n_per_client)
 
     # ── 扫描实验 ──
@@ -275,9 +288,9 @@ def main():
 
     print("\n===== Gaussian DP-FL: ε_round sweep =====")
     gau_acc = {}
-    for eps in epsilons:
+    for eps in gau_epsilons:                          # ← 使用独立的 Gaussian ε 列表
         mech  = "none" if math.isinf(eps) else "gaussian"
-        alpha = dp_alpha_map.get(eps)
+        alpha = gau_dp_alpha_map.get(eps)
         comp  = args.dp_composition if alpha is not None else "none"
         alpha = alpha if alpha is not None else 4.0
         print(f"\n-- {eps_label(eps)} ({mech}) --")
@@ -298,14 +311,14 @@ def main():
         os.path.join(args.outdir, "dp_laplace_acc.png"),
     )
     plot_eps_sweep(
-        gau_acc, epsilons, args.rounds,
+        gau_acc, gau_epsilons, args.rounds,           # ← 用 gau_epsilons
         f"Gaussian DP-FL — Accuracy vs Round"
         f" (N={args.clients}, C={args.clip_C}, per-round ε, δ={DELTA_DP})",
         os.path.join(args.outdir, "dp_gaussian_acc.png"),
     )
 
-    print_summary_table(lap_acc, gau_acc, epsilons)
-    save_csv(lap_acc, gau_acc, epsilons, args.rounds,
+    print_summary_table(lap_acc, gau_acc, all_epsilons)
+    save_csv(lap_acc, gau_acc, epsilons, gau_epsilons, args.rounds,
              os.path.join(args.outdir, "dp_acc_data.csv"))
     print("\nAll experiments done.")
 
