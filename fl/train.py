@@ -20,6 +20,7 @@ DP 方案（对齐 client/dp_mechanism.py + client/Update.py）：
 
 import copy
 import math
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -147,12 +148,15 @@ def federated_train(
                                       local_epochs, local_lr, device)
             delta = params_to_vector(local_state) - global_vec
 
-            # ---- DP 扰动（对齐官方） ----
+            # ---- DP 扰动（对齐官方 client/Update.py） ----
             if use_dp:
-                # 1. 裁剪 delta，限制 L2 灵敏度
-                delta = clip_gradient(delta, clip_C)
+                # 1. 裁剪 delta，限制灵敏度（对齐官方 perSampleClip norm 选择）
+                #    Laplace  → L1 范数裁剪（官方 norm=1）
+                #    Gaussian → L2 范数裁剪（官方 norm=2）
+                clip_norm = 1 if mechanism == "laplace" else 2
+                delta = clip_gradient(delta, clip_C, norm=clip_norm)
 
-                # 2. 计算敏感度（对齐 cal_client_sensitivity）
+                # 2. 计算敏感度（与官方 cal_client_sensitivity 公式完全一致）
                 n_samples   = len(loader.dataset)
                 sensitivity = cal_client_sensitivity(local_lr, clip_C, n_samples)
 
@@ -167,7 +171,6 @@ def federated_train(
                             alpha=dp_alpha, epsilon=epsilon_round,
                             sensitivity=sensitivity,
                             size=tuple(delta.shape))
-                        import numpy as _np
                         noise = torch.from_numpy(noise_np).to(
                             device=delta.device, dtype=delta.dtype)
                         delta = delta + noise

@@ -154,11 +154,30 @@ def renyi_gaussian_mechanism(alpha: float, epsilon: float,
 # 二、辅助接口（PyTorch 版，供 fl/train.py 使用）
 # ============================================================================
 
-def clip_gradient(vec: torch.Tensor, C: float) -> torch.Tensor:
-    """把向量裁剪到 L2 球半径 C（超出才裁，否则不变）。"""
-    norm = vec.norm(2).item()
-    if norm > C:
-        vec = vec * (C / norm)
+def clip_gradient(vec: torch.Tensor, C: float, norm: int = 2) -> torch.Tensor:
+    """把向量裁剪到 Lp 球半径 C（超出才裁，否则不变）。
+
+    Args:
+        vec:  要裁剪的张量（1-D 或任意形状）。
+        C:    裁剪阈值（对应官方 dp_clip）。
+        norm: 范数类型。
+              2 → L2 范数（Gaussian 机制，官方默认）
+              1 → L1 范数（Laplace 机制，对齐官方 perSampleClip norm=1）
+
+    官方 client/Update.py perSampleClip 使用：
+        Laplace  → norm=1
+        Gaussian → norm=2
+    本函数裁剪的是整体 delta（而非官方的 per-sample gradient），
+    但裁剪范数的选择与官方保持一致。
+    """
+    if norm == 2:
+        cur_norm = vec.norm(2).item()
+    elif norm == 1:
+        cur_norm = vec.norm(1).item()
+    else:
+        raise ValueError(f"norm 必须是 1 或 2，得到 {norm}")
+    if cur_norm > C:
+        vec = vec * (C / cur_norm)
     return vec
 
 
