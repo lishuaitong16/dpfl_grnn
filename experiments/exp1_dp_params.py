@@ -28,12 +28,11 @@ from fl.train import federated_train
 from fl.dp import noise_std_from_epsilon
 
 
-CLIP_C   = 1.0
 DELTA_DP = 1e-5
 
 
 def run_one(mechanism, epsilon_round, rounds, clients, local_epochs,
-            local_lr, batch_size, data_root, device):
+            local_lr, batch_size, data_root, device, clip_C):
     """Run one FL experiment and return acc_history."""
     train_set, test_set = get_datasets(data_root)
     client_subsets = split_iid(train_set, clients)
@@ -46,7 +45,7 @@ def run_one(mechanism, epsilon_round, rounds, clients, local_epochs,
         rounds=rounds, local_epochs=local_epochs,
         local_lr=local_lr, device=device,
         mechanism=mechanism, epsilon_round=epsilon_round,
-        clip_C=CLIP_C, delta_dp=DELTA_DP,
+        clip_C=clip_C, delta_dp=DELTA_DP,
         verbose=True,
     )
     return acc_hist
@@ -85,18 +84,18 @@ def plot_eps_sweep(acc_dict, epsilons, rounds, title, save_path):
     print(f"Curve saved: {save_path}")
 
 
-def print_param_table(epsilons, rounds, delta=DELTA_DP):
+def print_param_table(epsilons, rounds, clip_C, delta=DELTA_DP):
     """打印 DP 参数表：ε_round → σ_Lap / σ_Gau / ε_total。"""
     print("\n" + "=" * 72)
-    print(f"  per-round delta DP 参数表  C={CLIP_C}  δ={delta}  T={rounds} 轮")
+    print(f"  per-round delta DP 参数表  C={clip_C}  δ={delta}  T={rounds} 轮")
     print(f"  {'ε_round':>10}  {'σ_Lap':>10}  {'σ_Gau':>10}  {'ε_total':>10}")
     print("-" * 72)
     for eps in epsilons:
         if math.isinf(eps):
             print(f"  {'∞ (No DP)':>10}  {'0':>10}  {'0':>10}  {'∞':>10}")
         else:
-            sigma_lap = noise_std_from_epsilon("laplace",  eps, CLIP_C, delta)
-            sigma_gau = noise_std_from_epsilon("gaussian", eps, CLIP_C, delta)
+            sigma_lap = noise_std_from_epsilon("laplace",  eps, clip_C, delta)
+            sigma_gau = noise_std_from_epsilon("gaussian", eps, clip_C, delta)
             print(f"  {eps:>10g}  {sigma_lap:>10.4f}  {sigma_gau:>10.4f}  {eps*rounds:>10.1f}")
     print("=" * 72)
 
@@ -134,6 +133,8 @@ def main():
     p.add_argument("--batch_size",    type=int,   default=64)
     p.add_argument("--epsilon_round", type=str,   default="1,3,5,10,20,inf",
                    help="逗号分隔的每轮隐私预算 ε_round，inf 表示无 DP")
+    p.add_argument("--clip_C",        type=float, default=1.0,
+                   help="L2 裁剪范数（delta 敏感度上界）")
     p.add_argument("--data_root",     type=str,   default="./data")
     p.add_argument("--outdir",        type=str,   default="./results")
     p.add_argument("--gpu",           type=int,   default=0,
@@ -146,7 +147,7 @@ def main():
 
     epsilons = parse_epsilons(args.epsilon_round)
     print("\nε_round sweep:", ", ".join(eps_label(e) for e in epsilons))
-    print_param_table(epsilons, args.rounds)
+    print_param_table(epsilons, args.rounds, args.clip_C)
 
     print("\n===== Main experiment: ε_round sweep, Laplace =====")
     lap_acc = {}
@@ -158,6 +159,7 @@ def main():
             rounds=args.rounds, clients=args.clients,
             local_epochs=args.local_epochs, local_lr=args.local_lr,
             batch_size=args.batch_size, data_root=args.data_root, device=device,
+            clip_C=args.clip_C,
         )
 
     print("\n===== Main experiment: ε_round sweep, Gaussian =====")
@@ -170,16 +172,17 @@ def main():
             rounds=args.rounds, clients=args.clients,
             local_epochs=args.local_epochs, local_lr=args.local_lr,
             batch_size=args.batch_size, data_root=args.data_root, device=device,
+            clip_C=args.clip_C,
         )
 
     plot_eps_sweep(
         lap_acc, epsilons, args.rounds,
-        f"Laplace DP-FL — Accuracy vs Round (N={args.clients}, C={CLIP_C}, per-round ε)",
+        f"Laplace DP-FL — Accuracy vs Round (N={args.clients}, C={args.clip_C}, per-round ε)",
         os.path.join(args.outdir, "dp_laplace_acc.png"),
     )
     plot_eps_sweep(
         gau_acc, epsilons, args.rounds,
-        f"Gaussian DP-FL — Accuracy vs Round (N={args.clients}, C={CLIP_C}, per-round ε)",
+        f"Gaussian DP-FL — Accuracy vs Round (N={args.clients}, C={args.clip_C}, per-round ε)",
         os.path.join(args.outdir, "dp_gaussian_acc.png"),
     )
 

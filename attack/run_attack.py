@@ -64,7 +64,7 @@ def psnr(img1, img2):
 
 def grnn_attack(
     global_model,
-    true_grad,                 # 截获的真实梯度（已拉平），可以是带噪的
+    true_grad,                 # 截获的真实信号（已拉平）；纯梯度或 model_base+delta 均可
     batch_size: int,
     num_classes: int = 10,
     img_size: int = 32,
@@ -78,6 +78,7 @@ def grnn_attack(
     snapshot_iters=(0, 100, 300, 500, 1000, 1500, 1999),
     seed: int = 0,
     verbose: bool = True,
+    grad_offset: torch.Tensor = None,  # 若 true_grad = base_vec + delta，传入 base_vec 使 fake_grad 对齐
 ):
     """运行 GRNN 攻击，返回还原结果与中间快照。
 
@@ -110,6 +111,8 @@ def grnn_attack(
         optimizer.zero_grad()
         fake_img, fake_label = generator(v)
         fake_grad = compute_fake_gradient(global_model, fake_img, fake_label, device)
+        if grad_offset is not None:
+            fake_grad = grad_offset + fake_grad
 
         total, parts = grnn_loss(true_grad, fake_grad, fake_img, alpha=tv_alpha)
         total.backward()

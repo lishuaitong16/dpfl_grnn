@@ -1,20 +1,20 @@
-"""FedAvg 联邦学习主循环，支持 per-round delta DP。
+"""FedAvg 联邦学习主循环，支持 per-round DP。
 
 流程（每个通信轮）：
     1. 服务器把当前全局模型下发给各客户端；
-    2. 客户端本地训练（纯 SGD，无噪声）；
-    3. 客户端上传 delta = 训练后参数 - 全局参数；
-    4. 服务器对每个 delta 做 per-round DP：先裁剪到 L2 球 C，再加校准噪声；
-    5. 服务器平均所有（加噪后）delta，更新全局模型；
-    6. 在测试集上评估全局模型精度。
+    2. 客户端本地训练（纯 SGD），得到训练后参数向量 local_vec；
+    3. 计算参数更新量 delta = local_vec - global_vec，服务器对每个 delta
+       做 per-round DP：先裁剪到 L2 球 C，再加校准噪声；
+    4. 服务器平均所有（加噪后）delta，叠加到全局模型上，作为新的全局模型；
+    5. 在测试集上评估全局模型精度。
 
 无噪声时（mechanism="none"）即标准 FedAvg 基线。
 
 DP 参数说明（per-round sequential composition）：
-    total_epsilon : 全局隐私预算 ε_total（∞ 表示无 DP）
+    epsilon_round : 每轮隐私预算 ε_round（∞ 表示无 DP）
     clip_C        : L2 裁剪范数，即灵敏度上界 Δf = C
     delta_dp      : (ε,δ)-DP 的失败概率 δ（Gaussian only）
-    每轮预算      : ε_round = ε_total / rounds
+    总预算        : ε_total = ε_round × rounds
 """
 
 import copy
@@ -88,15 +88,19 @@ def federated_train(
     local_epochs: int = 1,
     local_lr: float = 0.01,
     device: str = "cuda",
-    mechanism: str = "none",            # "none" | "laplace" | "gaussian"
+    mechanism: str = "none",              # "none" | "laplace" | "gaussian"
     epsilon_round: float = float("inf"),  # 每轮隐私预算 ε_round；∞ 表示不加噪
-    clip_C: float = 1.0,                # L2 裁剪范数
-    delta_dp: float = 1e-5,             # (ε,δ)-DP 的 δ（Gaussian only）
+    clip_C: float = 9.0,                  # L2 裁剪范数
+    delta_dp: float = 1e-5,               # (ε,δ)-DP 的 δ（Gaussian only）
     verbose: bool = True,
 ):
     """运行联邦学习，返回 (global_model, acc_history)。
 
     acc_history: 每轮结束后的测试精度列表，用于画"精度 vs 轮数"曲线。
+
+    DP 在 delta（参数更新量 = local_vec - global_vec）上施加，而非完整参数向量。
+    服务端平均加噪后的 delta，叠加到全局模型上：
+        θ_global = θ_global + mean(privatize(θ_local_i - θ_global))
 
     DP 参数说明（per-round sequential composition）：
         epsilon_round : 每轮隐私预算 ε_round，总预算 ε_total = rounds × ε_round
@@ -119,14 +123,13 @@ def federated_train(
 
     for r in range(1, rounds + 1):
         global_state = global_model.state_dict()
-        global_vec = params_to_vector(global_state)
 
+        global_vec = params_to_vector(global_state)
         delta_sum = torch.zeros_like(global_vec)
         for loader in client_loaders:
             local_model = copy.deepcopy(global_model)
             local_state = local_train(local_model, loader, local_epochs, local_lr, device)
-            local_vec = params_to_vector(local_state)
-            delta = local_vec - global_vec
+            delta = params_to_vector(local_state) - global_vec
 
             if use_dp:
                 delta = privatize(delta, mechanism, epsilon_round, clip_C, delta_dp)
